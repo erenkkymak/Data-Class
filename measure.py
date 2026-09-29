@@ -1,230 +1,154 @@
 """
-measure.py - Generic and Reusable Benchmarking Helper
-Course: Data Structures and Management · Assoc. Prof. Dr. Emre Akadal · Istanbul University, MIS
-Assignment: P0 - Get to know Meydan
+measure.py - reusable benchmarking helper (Data Structures and Management, Fall 2026)
 
-Requirements:
-- Run operation at least 3 times and report median, min, max
-- Record cold and warm runs as separate rows
-- Take fixed seed and row count (n) as parameters and carry into output
-- Emit rows formatted exactly as:
-  Method | n | Time (median, s) | Min-Max | Time/n (µs) | Run
-- Export results to CSV
+Course rules implemented here:
+- every measurement is repeated at least 3 times -> median + min-max
+- cold and warm are separate rows
+    cold = first run in a FRESH PROCESS (connect + query), repeated in >= 3 separate processes
+    warm = runs after the first one, in the same process (the priming run is discarded)
+- seed and n are carried into every output row
+- output row: Method | n | Time (median, s) | Min-Max | Time/n (us) | Run | Growth factor | Result
 """
 
+import argparse
+import csv
+import json
+import sqlite3
+import statistics
+import subprocess
 import sys
 import time
-import sqlite3
-import csv
-import argparse
-import statistics
-from dataclasses import dataclass, asdict
-from typing import Callable, Any, List, Optional, Tuple
+from dataclasses import dataclass
+from typing import Any, Callable, List, Optional
+
+DEFAULT_DB = "Data-Class.db"
+SEED = 42
 
 
 @dataclass
 class MeasurementResult:
     method: str
     n: int
-    time_median_s: float
-    min_max: str
-    time_per_n_us: float
-    run: str
+    times: List[float]
+    run: str               # "cold" | "warm"
     seed: int
-    min_s: float
-    max_s: float
-    repeats: int
+    result: Any = None      # what the query returned (e.g. number of customers found)
+    growth_factor: Optional[float] = None
 
-    def to_table_row(self) -> str:
-        """Returns a pipe-delimited row matching the course requirement."""
-        return f"{self.method} | {self.n:,} | {self.time_median_s:.6f} | {self.min_max} | {self.time_per_n_us:.4f} | {self.run}"
+    @property
+    def median(self) -> float:
+        return statistics.median(self.times)
+
+    @property
+    def min_s(self) -> float:
+        return min(self.times)
+
+    @property
+    def max_s(self) -> float:
+        return max(self.times)
+
+    @property
+    def time_per_n_us(self) -> float:
+        return self.median * 1e6 / self.n if self.n else 0.0
+
+    def gf_str(self) -> str:
+        return "—" if self.growth_factor is None else f"{self.growth_factor:.2f}x"
 
     def to_markdown_row(self) -> str:
-        return f"| {self.method} | {self.n:,} | {self.time_median_s:.6f} | {self.min_max} | {self.time_per_n_us:.4f} | {self.run} |"
+        return (f"| {self.method} | {self.n:,} | {self.median:.6f} | {self.min_s:.6f}-{self.max_s:.6f} | "
+                f"{self.time_per_n_us:.4f} | {self.run} | {self.gf_str()} | {self.result} |")
 
     def to_csv_dict(self) -> dict:
         return {
-            "Method": self.method,
-            "n": self.n,
-            "Time (median, s)": f"{self.time_median_s:.6f}",
-            "Min-Max": self.min_max,
+            "Method": self.method, "n": self.n,
+            "Time (median, s)": f"{self.median:.6f}",
+            "Min-Max": f"{self.min_s:.6f}-{self.max_s:.6f}",
             "Time/n (us)": f"{self.time_per_n_us:.4f}",
             "Run": self.run,
-            "Seed": self.seed,
-            "Min (s)": f"{self.min_s:.6f}",
-            "Max (s)": f"{self.max_s:.6f}",
-            "Repeats": self.repeats,
+            "Growth factor": "" if self.growth_factor is None else f"{self.growth_factor:.4f}",
+            "Result": self.result, "Seed": self.seed, "Repeats": len(self.times),
+            "Min (s)": f"{self.min_s:.6f}", "Max (s)": f"{self.max_s:.6f}",
+            "All times (s)": ";".join(f"{t:.6f}" for t in self.times),
         }
 
 
-def measure(
-    operation: Callable[[], Any],
-    method: str,
-    n: int,
-    seed: int = 42,
-    warm_repeats: int = 5,
-    cold_operation: Optional[Callable[[], Any]] = None,
-    time_func: Callable[[], float] = time.perf_counter,
-) -> Tuple[MeasurementResult, MeasurementResult]:
-    """
-    Executes a cold run and at least 3 warm runs, returning two MeasurementResult objects:
-    (cold_result, warm_result)
-    
-    Parameters:
-    - operation: Callable to run for measurements
-    - method: Description / method name (e.g. 'Total Commission (SUM)')
-    - n: Row count / scale
-    - seed: Fixed generator seed
-    - warm_repeats: Number of warm runs (must be >= 3 per assignment spec)
-    - cold_operation: Optional separate callable for cold run (e.g. fresh connection)
-    - time_func: High resolution timer function (default: time.perf_counter)
-    """
-    if warm_repeats < 3:
-        raise ValueError("warm_repeats must be at least 3 as per specification.")
+# ---------------------------------------------------------------- core helpers
 
-    # 1. Cold Run: First run on untouched state
-    run_cold_fn = cold_operation if cold_operation is not None else operation
-    t_start = time_func()
-    _ = run_cold_fn()
-    cold_elapsed = time_func() - t_start
-
-    cold_time_per_n = (cold_elapsed * 1_000_000.0) / n if n > 0 else 0.0
-    cold_result = MeasurementResult(
-        method=method,
-        n=n,
-        time_median_s=cold_elapsed,
-        min_max=f"{cold_elapsed:.6f}-{cold_elapsed:.6f}",
-        time_per_n_us=cold_time_per_n,
-        run="cold",
-        seed=seed,
-        min_s=cold_elapsed,
-        max_s=cold_elapsed,
-        repeats=1,
-    )
-
-    # 2. Warm Runs: At least 3 executions on warmed cache
-    warm_times: List[float] = []
-    for _ in range(warm_repeats):
-        t_start = time_func()
-        _ = operation()
-        warm_times.append(time_func() - t_start)
-
-    warm_median = statistics.median(warm_times)
-    warm_min = min(warm_times)
-    warm_max = max(warm_times)
-    warm_time_per_n = (warm_median * 1_000_000.0) / n if n > 0 else 0.0
-
-    warm_result = MeasurementResult(
-        method=method,
-        n=n,
-        time_median_s=warm_median,
-        min_max=f"{warm_min:.6f}-{warm_max:.6f}",
-        time_per_n_us=warm_time_per_n,
-        run="warm",
-        seed=seed,
-        min_s=warm_min,
-        max_s=warm_max,
-        repeats=warm_repeats,
-    )
-
-    return cold_result, warm_result
+def measure_warm(operation: Callable[[], Any], method: str, n: int, seed: int = SEED,
+                 repeats: int = 5) -> MeasurementResult:
+    """Warm runs: one priming run (discarded), then `repeats` timed runs in the same process."""
+    if repeats < 3:
+        raise ValueError("repeats must be >= 3 (ground rule 4)")
+    operation()  # priming run = this process's cold run, not reported as warm
+    times, result = [], None
+    for _ in range(repeats):
+        t0 = time.perf_counter()
+        result = operation()
+        times.append(time.perf_counter() - t0)
+    return MeasurementResult(method, n, times, "warm", seed, result)
 
 
-def export_to_csv(results: List[MeasurementResult], filepath: str = "measurements.csv"):
-    """Exports measurement results to a CSV file."""
-    if not results:
-        return
-    fieldnames = list(results[0].to_csv_dict().keys())
-    with open(filepath, mode="w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        for res in results:
-            writer.writerow(res.to_csv_dict())
+def measure_cold(sql: str, params: dict, method: str, n: int, db: str = DEFAULT_DB,
+                 seed: int = SEED, repeats: int = 3, pragmas: Optional[List[str]] = None) -> MeasurementResult:
+    """Cold runs: each one is a brand-new Python process that connects, runs the query once, and exits."""
+    if repeats < 3:
+        raise ValueError("repeats must be >= 3 (ground rule 4)")
+    payload = json.dumps({"db": db, "sql": sql, "params": params, "pragmas": pragmas or []})
+    times, result = [], None
+    for _ in range(repeats):
+        out = subprocess.run([sys.executable, __file__, "--child", payload],
+                             capture_output=True, text=True, check=True)
+        data = json.loads(out.stdout.strip().splitlines()[-1])
+        times.append(data["elapsed"])
+        result = data["result"]
+    return MeasurementResult(method, n, times, "cold", seed, result)
+
+
+def run_sql(conn: sqlite3.Connection, sql: str, params: dict, pragmas: List[str]):
+    for p in pragmas:
+        conn.execute(p)
+    return conn.execute(sql, params).fetchone()[0]
+
+
+def _child(payload: str):
+    cfg = json.loads(payload)
+    t0 = time.perf_counter()
+    conn = sqlite3.connect(cfg["db"])          # reading the data is part of the measurement
+    res = run_sql(conn, cfg["sql"], cfg["params"], cfg["pragmas"])
+    elapsed = time.perf_counter() - t0
+    conn.close()
+    print(json.dumps({"elapsed": elapsed, "result": res}))
+
+
+def add_growth_factors(results: List[MeasurementResult]) -> None:
+    """Growth factor = this row's median / previous row's median (same method, same run type)."""
+    last = {}
+    for r in results:
+        key = (r.method, r.run)
+        if key in last:
+            r.growth_factor = r.median / last[key].median
+        last[key] = r
 
 
 def format_table(results: List[MeasurementResult]) -> str:
-    """Formats results into the standard course markdown table."""
-    headers = ["Method", "n", "Time (median, s)", "Min-Max", "Time/n (us)", "Run"]
-    separator = ["---", "---:", "---:", "---:", "---:", "---"]
-    lines = [
-        "| " + " | ".join(headers) + " |",
-        "| " + " | ".join(separator) + " |",
-    ]
-    for r in results:
-        lines.append(r.to_markdown_row())
-    return "\n".join(lines)
+    head = "| Method | n | Time (median, s) | Min-Max | Time/n (us) | Run | Growth factor | Result |"
+    sep = "| --- | ---: | ---: | ---: | ---: | --- | ---: | ---: |"
+    return "\n".join([head, sep] + [r.to_markdown_row() for r in results])
 
 
-def benchmark_p0_query(db_path: str = "Data-Class.db", seed: int = 42, warm_repeats: int = 5) -> List[MeasurementResult]:
-    """
-    Executes the P0 assignment query:
-    Total commission: Meydan takes 9% of every order.
-    Query: SELECT SUM(amount * 0.09) FROM <table>
-    Across all 4 scales: 10,000 / 100,000 / 1,000,000 / 10,000,000 rows.
-    """
-    tables = [
-        ("Orders_10k", 10_000),
-        ("Orders_100k", 100_000),
-        ("ORDERS_1M", 1_000_000),
-        ("ORDERS_10m", 10_000_000),
-    ]
-
-    all_results: List[MeasurementResult] = []
-
-    for table_name, n in tables:
-        query = f"SELECT SUM(amount * 0.09) FROM {table_name};"
-
-        # Cold operation: Open fresh connection and execute query once
-        def cold_op(t_name=table_name, q=query):
-            conn = sqlite3.connect(db_path)
-            cur = conn.cursor()
-            res = cur.execute(q).fetchone()
-            conn.close()
-            return res
-
-        # Warm operation: Reuse connection across warm repetitions
-        warm_conn = sqlite3.connect(db_path)
-        warm_cur = warm_conn.cursor()
-
-        def warm_op(cur=warm_cur, q=query):
-            return cur.execute(q).fetchone()
-
-        method_label = "Total Commission (SQL SUM)"
-        cold_res, warm_res = measure(
-            operation=warm_op,
-            method=method_label,
-            n=n,
-            seed=seed,
-            warm_repeats=warm_repeats,
-            cold_operation=cold_op,
-        )
-        warm_conn.close()
-
-        all_results.append(cold_res)
-        all_results.append(warm_res)
-
-    return all_results
+def export_to_csv(results: List[MeasurementResult], path: str) -> None:
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=list(results[0].to_csv_dict().keys()))
+        w.writeheader()
+        for r in results:
+            w.writerow(r.to_csv_dict())
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Meydan P0 Measurement Helper")
-    parser.add_argument("--db", default="Data-Class.db", help="Path to SQLite database")
-    parser.add_argument("--seed", type=int, default=42, help="Random seed used in generator")
-    parser.add_argument("--repeats", type=int, default=5, help="Number of warm runs (min 3)")
-    parser.add_argument("--csv", default="measurements.csv", help="Path to output CSV file")
-    args = parser.parse_args()
-
-    print(f"Running P0 Commission benchmark on '{args.db}' (Seed={args.seed}, Warm repeats={args.repeats})...\n")
-    results = benchmark_p0_query(db_path=args.db, seed=args.seed, warm_repeats=args.repeats)
-
-    table_md = format_table(results)
-    print("### Measurement Results Table (Course Standard Format):\n")
-    print(table_md)
-    print("\n")
-
-    export_to_csv(results, args.csv)
-    print(f"-> Results successfully exported to CSV: {args.csv}")
+def environment_line() -> str:
+    import platform
+    return (f"{platform.platform()} | {platform.processor()} | Python {platform.python_version()} | "
+            f"sqlite3 C engine {sqlite3.sqlite_version}")
 
 
-if __name__ == "__main__":
-    main()
+if __name__ == "__main__" and len(sys.argv) >= 3 and sys.argv[1] == "--child":
+    _child(sys.argv[2])

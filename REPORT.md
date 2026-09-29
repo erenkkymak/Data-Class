@@ -3,7 +3,7 @@
 **Course:** Data Structures and Management  
 **Instructor:** Assoc. Prof. Dr. Emre Akadal · Istanbul University, MIS · Fall 2026  
 **Student:** Mahmut Eren Akkaymak (`mahmuteren.akkaymak@ogr.iu.edu.tr`)  
-**Repository:** [github.com/erenkkymak/meydan](https://github.com/erenkkymak/Data-Class)
+**Repository:** [github.com/erenkkymak/meydan](https://github.com/erenkkymak/meydan)
 
 ---
 
@@ -33,7 +33,7 @@ All measurements throughout this term will be conducted on this exact machine to
 - **Schema & Distributions:**
   - `order_id`: 1 ... N (Primary Key)
   - `customer_id`: 1 ... N/20
-  - `order_date`: Uniformly sampled across the last 1,095 days (3 years: 2023-09-26 to 2026-09-23)
+  - `order_date`: Uniformly sampled across the last 1,095 days (3 years: 2023-09-25 to 2026-09-23, both inclusive; end date fixed, not `now()`, so reruns give identical data)
   - `amount`: Log-normal distribution, median 640 TL ($\mu = \ln(640) \approx 6.461468$, $\sigma = 0.5$)
   - `seller_id`: Skewed Pareto distribution (Top 50 sellers generate 38% of order volume; remaining 10,950 sellers hold 62%)
   - `city`: Sampled across 81 Turkish provinces weighted by official TÜİK population statistics.
@@ -90,43 +90,39 @@ All measurements throughout this term will be conducted on this exact machine to
 1. **Direction and Magnitude of Error:**
    Our estimate was wrong by an overestimation of approximately **3.9x**: we expected the 10 million row aggregation to take ~2.00 seconds, but it completed in only **0.511 seconds** (warm median) and **0.518 seconds** (cold).
 2. **What Caused the Gap:**
-   We anticipated significant overhead from Python-SQLite cursor dispatch, record deserialization, and memory-to-CPU cache page swapping. However, because our benchmark environment features 96 GB RAM and an AMD Ryzen 9 9950X3D with substantial 3D V-Cache, the entire ~482 MB database resides effortlessly in the OS page cache. SQLite executes the entire `SUM(amount * 0.09)` loop in a tightly unrolled internal C routine without materializing intermediate Python tuple objects, sustaining an throughput of **~19.55 million rows per second**.
+   I priced in overhead that is not there. SQLite runs `SUM(amount * 0.09)` inside its own C loop and returns one row, so no Python object is created per row; the whole 482 MB file was also already in the Windows file cache (96 GB RAM, the database had just been generated). Result: ~19.6 million rows/second instead of the 5 million I assumed. (An earlier draft blamed the CPU's 3D V-Cache — wrong: 482 MB does not fit in a 128 MB L3.)
 3. **Scaling Factor Dynamics:**
-   Between 10k and 100k, the observed warm scaling factor was **21.4x** (from 0.24 ms to 5.06 ms) rather than 10.0x because at $N=10,000$, constant initialization costs (SQL parsing, VM opcode dispatch, Python wrapper overhead) dilute the per-row time. From $N=100,000$ to $N=1,000,000$ (factor: **10.40x**) and $N=1,000,000$ to $N=10,000,000$ (factor: **9.72x**), the system locks into nearly pure, linear $O(N)$ execution.
+   Above 100k rows the factor is linear, as estimated: **10.40x** (100k→1M) and **9.72x** (1M→10M). The odd step is 10k→100k at **21.4x**. My first explanation — "fixed costs dilute the per-row time at 10k" — is backwards: fixed costs would push that factor *below* 10, not above. The better explanation is that `Orders_10k` (~0.5 MB) fits entirely in SQLite's own page cache (default `cache_size = -2000` = ~2 MB; checked with `PRAGMA cache_size`) inside the warm connection, so warm 10k runs never touch the OS; the 100k table (~5 MB) does not fit, so every warm run reads pages through the OS again. The 10k warm row is therefore unusually *fast*, not the 100k row unusually slow. The 10k warm max (1.10 ms) is 4.7× its median (0.24 ms): the first warm run was still loading pages — the min–max gap is the finding the course asked us to look for.
+4. **Limitation found afterwards — my "cold" runs were not cold.** P0 measured "cold" as a fresh connection inside the same Python process, once, with the OS file cache already warm. That is why cold ≈ warm at 1M/10M (0.518 s vs 0.511 s) and why the cold min–max collapses to one value (a single run breaks ground rule 4). From P1 on, `measure.py` runs cold as **three separate fresh Python processes**; Q1 is re-measured under that rule in P1.
 
 ---
 
 ## 5. Three Numbers from the Dossier (Section 6)
 
 ### 1. Commission per order (in TL)
-- **Meydan Commission Rate:** 9% ($0.09$)
-- **Median Basket:** 640 TL  
-  $$\text{Commission (Median Order)} = 640 \times 0.09 = \mathbf{57.60 \text{ TL}}$$
-- **Mean (Expected) Basket:**  
-  For a log-normal distribution with $\mu = \ln(640)$ and $\sigma = 0.5$:  
-  $$E[\text{amount}] = \text{median} \times e^{\sigma^2 / 2} = 640 \times e^{0.125} \approx 640 \times 1.133148 \approx 725.21 \text{ TL}$$
-  $$\text{Commission (Mean Order)} = 725.21 \times 0.09 = \mathbf{65.27 \text{ TL}}$$
-  *(Empirically confirmed from the 10M dataset: total commission 652,698,511.95 TL / 10,000,000 = 65.27 TL/order).*
+- **Basket-based:** average basket 640 TL × 9% = **57.60 TL** per order.
+- **Totals-based:** annual commission 162,000,000 TL ÷ annual orders (42,000 × 365 = 15,330,000) = **10.57 TL** per order.
+- **These disagree by 5.4×, and that is a finding.** 1.8 billion TL GMV ÷ 15.33 million orders = **117 TL per order**, not 640 TL. Either "order" (per seller) and "basket" (per checkout) are different units — a 640 TL basket split across ~5.5 sellers — or one of the dossier numbers is wrong. The campaign days (380,000 orders) only widen the gap. Before any case uses "commission per order", I will state which unit I mean.
+- (Generator check: my amounts are log-normal with median 640 TL, σ = 0.5, so the mean order is 640 × e^{0.125} = 725.21 TL → 65.27 TL commission; the 10M table gives 652,698,511.95 TL / 10,000,000 = 65.27 TL. Matches.)
 
 ### 2. Annual GMV per Active Customer
-- **Active Customers (Denominator):** 620,000 (customers who made a purchase in the last 12 months).
-- **Registered Customers (Distractor Denominator):** 2,400,000.
-- **Arithmetic:**  
-  $$\text{Annual GMV per Active Customer} = \frac{\text{Annual GMV}}{620,000}$$  
-  *Denominator Insight:* A marketing deck would prefer to divide by total registered users ($2,400,000$) or show inflated customer reach, but calculating per active customer ($620,000$) reflects genuine monetization per transacting buyer. Using the wrong denominator turns a factually correct calculation into a misleading business metric.
+$$\frac{1{,}800{,}000{,}000\ \text{TL}}{620{,}000} = \mathbf{2{,}903.23\ \text{TL per active customer per year}}$$
+Over the 2,400,000 registered customers the same GMV gives only **750 TL** — 3.9× smaller. Which one a deck prints depends on the story: "750 TL per customer" flatters the *reach* story (2.4 M customers), "2,903 TL" flatters monetisation. Only 620,000 / 2,400,000 = **25.8%** of registered customers bought anything in the last 12 months — the denominator decides the headline.
 
 ### 3. Ratio of Campaign Day to Normal Day (Order Volume)
-- **Arithmetic:**  
-  $$\text{Ratio} = \frac{\text{Order Volume on Campaign Day}}{\text{Order Volume on Normal Day}}$$  
-  Shows the surge multiplier handled by Meydan's operational and database infrastructure during promotional spikes.
+$$\frac{380{,}000}{42{,}000} = \mathbf{9.05\times}$$
+A campaign day is ~9× a normal day. Anything that scales worse than linearly (see P1) gets much worse than 9× slower on that day.
 
 ---
 
 ## 6. The AI Box
 
-- **What was asked:**  
-  To analyze the P0 assignment brief, implement the `measure()` helper adhering to course specifications (cold/warm split, median, min-max tracking, $\mu s$/row calculation), commit prior estimates to Git before measurement, benchmark the 9% commission query across all 4 scales, and export results to CSV.
-- **Where it was wrong / What was corrected:**  
-  Initial terminal table output on Windows console rendered Unicode characters (`–` en-dash and `µs`) with codepage artifacts (``). This was immediately rectified in `measure.py` by using standard ASCII-safe hyphens and `Time/n (us)`. Furthermore, ensuring a true cold run required opening a fresh SQLite connection for the first pass rather than reusing an already-opened connection.
-- **How we found out:**  
-  By inspecting terminal output logs, reviewing generated CSV contents (`measurements.csv`), and comparing SQLite connection caching semantics against monotonic timer traces.
+- **What I asked the model:** to help write the generator (seller skew, population-weighted cities, log-normal amounts), the `measure()` helper, and to explain the measured growth factors.
+- **Where it was wrong:** (1) it explained the 21.4× jump at 10k→100k with "fixed costs dilute per-row time at small n" — that would make the factor *smaller* than 10, not larger; (2) it credited the speed to the CPU's 3D V-Cache, which cannot hold a 482 MB file; (3) its first `measure()` treated a new connection in the same process as a cold run, and measured it only once.
+- **How I found out:** (1) by checking the direction of the effect with the numbers (0.24 ms → 5.06 ms is a jump *up*); (2) by comparing file size with the L3 size; (3) by re-reading the P1 definition of cold ("first run in a freshly started process") and noticing cold ≈ warm and a zero-width cold min–max in my own table.
+- I also used the model to review this report against the P0 card; it found that section 6 had formulas but no numbers and that the dossier's GMV, basket and order counts do not agree. I checked each figure by hand.
+- (Earlier, minor: Windows console printed `–` and `µs` as codepage garbage; switched to ASCII.)
+
+---
+
+*Environment: AMD Ryzen 9 9950X3D (16C/32T), 96 GB DDR5, NVMe SSD · Windows 11 Pro 10.0.26200 · Python 3.11.9 · sqlite3 module 2.6.0, SQLite engine 3.45.1 · seed 42*

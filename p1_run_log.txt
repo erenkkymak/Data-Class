@@ -1,0 +1,26 @@
+Environment: Windows-10-10.0.26200-SP0 | AMD64 Family 26 Model 68 Stepping 0, AuthenticAMD | Python 3.11.9 | sqlite3 C engine 3.45.1
+Q1 - total commission
+  Q1 commission (SUM)          n=    10,000  cold=0.0016s  warm=0.0002s  result=652338.9072
+  Q1 commission (SUM)          n=   100,000  cold=0.0068s  warm=0.0051s  result=6523716.9059999995
+  Q1 commission (SUM)          n= 1,000,000  cold=0.0528s  warm=0.0513s  result=65239838.9406
+  Q1 commission (SUM)          n=10,000,000  cold=0.5248s  warm=0.5170s  result=652698511.9497
+Q2 - naive nested loop (first N rows of Orders_10k)
+  Q2 naive (compare)           n=     1,250  cold=0.0402s  warm=0.0389s  result=0
+  Q2 naive (compare)           n=     2,500  cold=0.1539s  warm=0.1531s  result=4
+  Q2 naive (compare)           n=     5,000  cold=0.6090s  warm=0.6014s  result=22
+  Q2 naive (compare)           n=    10,000  cold=2.4013s  warm=2.4063s  result=86
+Q3 - GROUP BY, full scales
+  Q3 grouping (GROUP BY)       n=    10,000  cold=0.0045s  warm=0.0033s  result=86
+  Q3 grouping (GROUP BY)       n=   100,000  cold=0.0465s  warm=0.0433s  result=829
+  Q3 grouping (GROUP BY)       n= 1,000,000  cold=0.5248s  warm=0.5224s  result=8167
+  Q3 grouping (GROUP BY)       n=10,000,000  cold=5.6346s  warm=5.6174s  result=82751
+Q3 - GROUP BY on the Q2 prefixes (identity check)
+  Q3 grouping, prefix          n=     1,250  cold=0.0015s  warm=0.0003s  result=0
+  Q3 grouping, prefix          n=     2,500  cold=0.0018s  warm=0.0007s  result=4
+  Q3 grouping, prefix          n=     5,000  cold=0.0027s  warm=0.0016s  result=22
+  Q3 grouping, prefix          n=    10,000  cold=0.0046s  warm=0.0033s  result=86
+
+Wrote p1_measurements.csv and p1_results.md
+Q2 exponent k=1.98; 100k ~ 232 s; 1M ~ 22,352 s
+exit code 0 
+DONE 

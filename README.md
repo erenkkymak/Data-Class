@@ -1,4 +1,4 @@
-# Meydan — Data Structures and Management (P0)
+# Meydan — Data Structures and Management
 
 **Course:** Data Structures and Management (Fall 2026)  
 **Instructor:** Assoc. Prof. Dr. Emre Akadal · Istanbul University, MIS  
@@ -18,6 +18,16 @@ This repository contains the codebase, benchmarking helpers, prior estimates, an
 
 ---
 
+## P1 — The dashboard is empty at 08:00
+
+- [ESTIMATE_P1.md](ESTIMATE_P1.md): P1 estimates, committed before any P1 query ran (commit `bbc203d`).
+- [p1.py](p1.py): Q1 (commission), Q2 (naive compare, first N rows), Q3 (GROUP BY) + Q2 = Q3 check + Q2 extrapolation.
+- [p1_measurements.csv](p1_measurements.csv), [p1_results.md](p1_results.md), [p1_run_log.txt](p1_run_log.txt): raw output.
+- [p1_chart.png](p1_chart.png): log–log chart, produced by [plot_p1.py](plot_p1.py).
+- [REPORT_P1.md](REPORT_P1.md): answer to Sinem, table, chart, AI box.
+
+Run on Windows: `run_p1.bat` (or `python p1.py`, then `python plot_p1.py`).
+
 ## How to Run
 
 ### 1. Generate the SQLite Database
@@ -28,7 +38,7 @@ python generate_db.py
 
 ### 2. Run Benchmark & Export CSV
 ```bash
-python measure.py --csv measurements.csv --repeats 5
+git show bb309b3:measure.py > measure_p0.py && python measure_p0.py --csv measurements.csv --repeats 5   # P0 version of the helper
 ```
 
 ---
